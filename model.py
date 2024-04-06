@@ -144,10 +144,9 @@ class GPT(nn.Module):
                 ln_f=LayerNorm(config.n_embd, bias=config.bias),
                 )
             )
-        self.aux_lm_head_list = nn.ModuleList(
-            [nn.Linear(config.n_embd, config.vocab_size, bias=False) for _ in range(config.n_layer)]
-            )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # local learning
+        self.lm_head_split = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -184,6 +183,34 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def compute_embeddings(self, idx, targets=None):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, (f"Cannot forward sequence of length {t}, block size is only "
+                                             f"{self.config.block_size}")
+        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos)
+        x = self.transformer.drop(tok_emb + pos_emb)
+
+        return x
+
+    def compute_logits(self, x, targets=None, split=False):
+        x = self.transformer.ln_f(x)
+        proj_head = self.lm_head_split if split else self.lm_head
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = proj_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = proj_head(x[:, [-1], :])
+            loss = None
+
+        return logits, loss
+
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
@@ -196,12 +223,9 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         losses = []
+
         for k, block in enumerate(self.transformer.h):
             x = block(x)
-            if k < self.config.n_layer - 1:
-                losses.append(
-                    F.cross_entropy(self.aux_lm_head_list[block].forward(x), targets.view(-1), ignore_index=-1)
-                    )
         x = self.transformer.ln_f(x)
 
         if targets is not None:
