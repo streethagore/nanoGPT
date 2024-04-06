@@ -317,6 +317,7 @@ while True:
             for k in range(split):
                 x = model.transformer.h[k](x)
             logits_split, loss_split = model.compute_logits(x, Y, split=True)
+            loss_split = loss_split / gradient_accumulation_steps
             scaler.scale(loss_split).backward()
 
             x = x.detach()
