@@ -200,7 +200,7 @@ class GPT(nn.Module):
             x = block(x)
             if k < self.config.n_layer - 1:
                 losses.append(
-                    F.cross_entropy(self.aux_lm_head_list[block].forward(x), targets.view(-1), ignore_index=-1)
+                    F.cross_entropy(self.aux_lm_head_list[k].forward(x), targets.view(-1), ignore_index=-1)
                     )
         x = self.transformer.ln_f(x)
 
