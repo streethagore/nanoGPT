@@ -154,7 +154,9 @@ class GPT(nn.Module):
 
         num_blocks_per_split = math.ceil(config.n_layer / num_splits)
         split_index = [max(k * num_blocks_per_split, config.n_layer) for k in range(1, num_splits + 1)]
-        self.splits = [self.transformer.h[split_index[k]:split_index[k + 1]] for k in range(num_splits)]
+        self.splits = [
+            self.transformer.h[split_deb:split_fin] for split_deb, split_fin in zip([0] + split_index[:-1], split_index)
+            ]
         self.num_splits = num_splits
 
         # with weight tying when using torch.compile() some warnings get generated:
