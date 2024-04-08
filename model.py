@@ -129,7 +129,7 @@ class GPTConfig:
 
 class GPT(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, num_splits=1):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
@@ -146,7 +146,17 @@ class GPT(nn.Module):
             )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # local learning
-        self.lm_head_split = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.aux_ln_f = [LayerNorm(config.n_embd, bias=config.bias) for _ in range(num_splits - 1)]
+        self.all_ln_f = self.aux_ln_f + [self.transformer.ln_f]
+
+        self.aux_lm_heads = [nn.Linear(config.n_embd, config.vocab_size, bias=False) for _ in range(num_splits - 1)]
+        self.all_lm_heads = self.aux_lm_heads + [self.lm_head]
+
+        num_blocks_per_split = math.ceil(config.n_layer / num_splits)
+        split_index = [max(k * num_blocks_per_split, config.n_layer) for k in range(1, num_splits + 1)]
+        self.splits = [self.transformer.h[split_index[k]:split_index[k + 1]] for k in range(num_splits)]
+        self.num_splits = num_splits
+
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -197,9 +207,14 @@ class GPT(nn.Module):
 
         return x
 
-    def compute_logits(self, x, targets=None, split=False):
-        x = self.transformer.ln_f(x)
-        proj_head = self.lm_head_split if split else self.lm_head
+    def compute_split(self, x, split_index=-1):
+        for block in self.splits[split_index]:
+            x = block(x)
+        return x
+
+    def compute_logits(self, x, targets=None, split_index=-1):
+        x = self.all_ln_f[split_index](x)
+        proj_head = self.all_lm_heads[split_index]
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = proj_head(x)
@@ -222,12 +237,12 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        losses = []
 
         for k, block in enumerate(self.transformer.h):
             x = block(x)
-        x = self.transformer.ln_f(x)
 
+        # compute loss and logits
+        x = self.transformer.ln_f(x)
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
@@ -236,7 +251,6 @@ class GPT(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
             loss = None
-        loss = loss + sum(losses) if losses else loss
 
         return logits, loss
 

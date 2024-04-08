@@ -315,20 +315,15 @@ while True:
         with ctx:
             x = model.compute_embeddings(X, Y)
             for k in range(split):
-                x = model.transformer.h[k](x)
-            logits_split, loss_split = model.compute_logits(x, Y, split=True)
-            loss_split = loss_split / gradient_accumulation_steps
-            scaler.scale(loss_split).backward()
-
-            x = x.detach()
-            for k in range(split, n_block):
-                x = model.transformer.h[k](x)
-            logits, loss = model.compute_logits(x, Y)
-            loss = loss / gradient_accumulation_steps  # scale the loss to account for gradient accumulation
-            scaler.scale(loss).backward()
+                x = model.compute_split(x, split)
+                logits_split, loss_split = model.compute_logits(x, targets=Y, split_index=split)
+                # backward pass, with gradient scaling if training in fp16
+                loss_split = loss_split / gradient_accumulation_steps
+                scaler.scale(loss_split).backward()
+                x = x.detach()
+            logits, loss = logits_split, loss_split
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
 
     # clip the gradient
     if grad_clip != 0.0:
